@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "defaultActionId": "web",
+  "actions": [
+    {
+      "id": "web",
+      "name": "妙搭部署平台",
+      "command": "export MIAODA_ASSEMBLE_SCRIPT=\"$HOME/.trae-cn/skills/miaoda-app-assemble/scripts/export-miaoda-app.sh\"\ngo version && npm --prefix frontend start",
+      "cwd": ".",
+      "background": true,
+      "source": "agent",
+      "readiness": {
+        "outputPatterns": ["[service] started address="],
+        "timeoutMs": 60000
+      },
+      "open": {
+        "type": "preview",
+        "url": "http://127.0.0.1:18080/"
+      }
+    }
+  ]
+}

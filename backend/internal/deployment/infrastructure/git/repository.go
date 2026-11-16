@@ -19,13 +19,18 @@ func NewRepository() *Repository {
 }
 
 func (r *Repository) Command(ctx context.Context, dir string, args ...string) (string, error) {
+	return r.CommandWithEnvironment(ctx, dir, os.Environ(), args...)
+}
+
+// CommandWithEnvironment 用任务专属的凭据环境执行 Git。
+func (r *Repository) CommandWithEnvironment(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	started := time.Now()
 	operation := "unknown"
 	if len(args) > 0 {
 		operation = args[0]
 	}
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.hooksPath=/dev/null"}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = NonInteractiveEnvironment(env)
 	cmd.Dir, cmd.WaitDelay = dir, 5*time.Second
 	out, err := cmd.Output()
 	if err != nil {

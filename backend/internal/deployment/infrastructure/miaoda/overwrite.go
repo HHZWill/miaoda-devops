@@ -403,13 +403,6 @@ func validateOverwritePackage(source string) error {
 	if _, err := loadDDLUnits(path, names); err != nil {
 		return err
 	}
-	docs := filepath.Join(source, assembleRelativeDir)
-	if _, _, err := parseRolesDocument(filepath.Join(docs, "roles.md")); err != nil {
-		return err
-	}
-	if _, err := parseAutomationDocument(filepath.Join(docs, "automation.md")); err != nil {
-		return err
-	}
-	_, err = parseEnvDocument(filepath.Join(docs, "env.md"))
+	_, err = loadDeploymentConfiguration(source)
 	return err
 }

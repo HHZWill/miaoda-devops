@@ -164,12 +164,16 @@ func (s *Client) pushSource(ctx context.Context, j *domain.Job, work, source str
 		return err
 	}
 	repo := credentials.Data.Repo
+	env, err := s.Lark.GitEnvironment(j.Profile, j.TargetID)
+	if err != nil {
+		return err
+	}
 	address, err := url.Parse(repo)
 	if err != nil || address.Scheme != "https" || address.Hostname() == "" || address.User != nil {
 		return errors.New("妙搭未返回有效的 Git 仓库地址")
 	}
 	target := filepath.Join(work, "repo")
-	if _, err := s.Git.Command(ctx, work, "clone", "--depth=1", "--", repo, target); err != nil {
+	if _, err := s.Git.CommandWithEnvironment(ctx, work, env, "clone", "--depth=1", "--", repo, target); err != nil {
 		return err
 	}
 	if _, err := s.Git.Command(ctx, target, "checkout", Branch); err != nil {
@@ -200,6 +204,6 @@ func (s *Client) pushSource(ctx context.Context, j *domain.Job, work, source str
 			return err
 		}
 	}
-	_, err = s.Git.Command(ctx, target, "push", "origin", Branch)
+	_, err = s.Git.CommandWithEnvironment(ctx, target, env, "push", "origin", Branch)
 	return err
 }

@@ -23,6 +23,7 @@ import (
 const (
 	ddlRelativeDir = "docs/agent_assemble/ddl"
 	ddlPhaseTypes  = "types"
+	ddlPhasePre    = "pre_functions"
 	ddlPhaseTables = "tables"
 	ddlPhasePost   = "post"
 	ddlPhaseInsert = "inserts"
@@ -360,6 +361,8 @@ func ddlPhase(name string) string {
 		return "extensions"
 	case strings.Contains(stem, "types"):
 		return ddlPhaseTypes
+	case strings.Contains(stem, "pre_functions"):
+		return ddlPhasePre
 	case strings.Contains(stem, "foreign_keys"):
 		return "foreign_keys"
 	case strings.Contains(stem, "tables"):
@@ -377,6 +380,8 @@ func ddlPhaseOrder(phase string) int {
 		return 5
 	case ddlPhaseTypes:
 		return 10
+	case ddlPhasePre:
+		return 15
 	case ddlPhaseTables:
 		return 20
 	case "foreign_keys":

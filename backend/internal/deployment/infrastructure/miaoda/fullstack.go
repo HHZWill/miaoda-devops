@@ -24,10 +24,16 @@ type fullStackCredentials struct {
 	Repo  string `json:"repository_url"`
 	Name  string `json:"commit_author_name"`
 	Email string `json:"commit_author_email"`
+
+	environment []string
 }
 
 // deployFullStackGo 使用 Go 完成全栈应用部署，不依赖 Skill 脚本。
 func (s *Client) DeployFullStack(ctx context.Context, j *domain.Job, work, source string) error {
+	configuration, err := loadDeploymentConfiguration(source)
+	if err != nil {
+		return fmt.Errorf("校验部署配置失败：%w", err)
+	}
 	resumeIndex := domain.FullDeployStepIndex(j.ResumeFrom)
 	if j.ResumeFrom == domain.ResetTargetStep {
 		resumeIndex = domain.FullDeployStepIndex("提交并推送代码")
@@ -91,7 +97,7 @@ func (s *Client) DeployFullStack(ctx context.Context, j *domain.Job, work, sourc
 	if codeStage {
 		if j.Overwrite != nil && j.ResumeFrom != "提交并推送代码" {
 			s.SetStep(j, domain.ResetTargetStep, domain.StepRunning, "")
-			if _, err := s.Git.Command(ctx, repo, "push", "--dry-run", "origin", Branch); err != nil {
+			if _, err := s.Git.CommandWithEnvironment(ctx, repo, credentials.environment, "push", "--dry-run", "origin", Branch); err != nil {
 				return fmt.Errorf("无法确认目标仓库推送权限：%w", err)
 			}
 			if err := s.ResetOverwriteTarget(ctx, j, work, source); err != nil {
@@ -115,17 +121,17 @@ func (s *Client) DeployFullStack(ctx context.Context, j *domain.Job, work, sourc
 		s.SetStep(j, "执行 DDL", "success", "")
 	}
 	if shouldRun("创建应用角色") {
-		if err := s.deployRoles(ctx, j, work, source); err != nil {
+		if err := s.deployRoles(ctx, j, work, configuration.Roles, configuration.AdminID); err != nil {
 			return err
 		}
 	}
 	if shouldRun("创建自动化") {
-		if err := s.deployAutomations(ctx, j, work, source); err != nil {
+		if err := s.deployAutomations(ctx, j, work, configuration.Automations); err != nil {
 			return err
 		}
 	}
 	if shouldRun("设置环境变量") {
-		if err := s.deployEnvironment(ctx, j, work, source); err != nil {
+		if err := s.deployEnvironment(ctx, j, work, configuration.Environment); err != nil {
 			return err
 		}
 	}
@@ -218,16 +224,21 @@ func (s *Client) cloneFullStackRepo(ctx context.Context, j *domain.Job, work str
 		return "", fullStackCredentials{}, err
 	}
 	credentials := result.Data
+	env, err := s.Lark.GitEnvironment(j.Profile, j.TargetID)
+	if err != nil {
+		return "", credentials, err
+	}
+	credentials.environment = env
 	address, err := url.Parse(credentials.Repo)
 	if err != nil || address.Scheme != "https" || address.Hostname() == "" || address.User != nil {
 		return "", credentials, errors.New("妙搭未返回有效的 Git 仓库地址")
 	}
 	target := filepath.Join(work, "repo")
-	_, err = s.Git.Command(ctx, work, "clone", "--depth=1", "--single-branch", "--branch", Branch, "--", credentials.Repo, target)
+	_, err = s.Git.CommandWithEnvironment(ctx, work, credentials.environment, "clone", "--depth=1", "--single-branch", "--branch", Branch, "--", credentials.Repo, target)
 	if err != nil {
 		// 新应用可能尚无目标分支，回退到默认分支。
 		_ = os.RemoveAll(target)
-		if _, err = s.Git.Command(ctx, work, "clone", "--depth=1", "--", credentials.Repo, target); err != nil {
+		if _, err = s.Git.CommandWithEnvironment(ctx, work, credentials.environment, "clone", "--depth=1", "--", credentials.Repo, target); err != nil {
 			return "", credentials, err
 		}
 	}
@@ -335,7 +346,7 @@ func (s *Client) commitAndPushFullStack(ctx context.Context, repo string, creden
 	var pushErr error
 	// 瞬时网关错误允许重试同一提交。
 	for attempt := 0; attempt < 3; attempt++ {
-		if _, pushErr = s.Git.Command(ctx, repo, "push", "origin", Branch); pushErr == nil {
+		if _, pushErr = s.Git.CommandWithEnvironment(ctx, repo, credentials.environment, "push", "origin", Branch); pushErr == nil {
 			return nil
 		}
 		select {
@@ -348,13 +359,9 @@ func (s *Client) commitAndPushFullStack(ctx context.Context, repo string, creden
 }
 
 // deployRoles 创建角色并将当前部署者加入角色。
-func (s *Client) deployRoles(ctx context.Context, j *domain.Job, work, source string) error {
+func (s *Client) deployRoles(ctx context.Context, j *domain.Job, work string, roles []roleDefinition, adminID string) error {
 	const stepName = "创建应用角色"
 	s.SetStep(j, stepName, "running", "")
-	roles, adminID, err := parseRolesDocument(filepath.Join(source, assembleRelativeDir, "roles.md"))
-	if err != nil {
-		return fmt.Errorf("解析角色配置失败：%w", err)
-	}
 	if len(roles) == 0 {
 		s.SetStep(j, stepName, "skipped", "安装包未声明应用角色")
 		return nil
@@ -443,13 +450,9 @@ func containsRoleID(roles []roleDefinition, adminID string, failures []string) b
 }
 
 // deployAutomations 创建或更新自动化触发器。
-func (s *Client) deployAutomations(ctx context.Context, j *domain.Job, work, source string) error {
+func (s *Client) deployAutomations(ctx context.Context, j *domain.Job, work string, triggers []map[string]any) error {
 	const stepName = "创建自动化"
 	s.SetStep(j, stepName, "running", "")
-	triggers, err := parseAutomationDocument(filepath.Join(source, assembleRelativeDir, "automation.md"))
-	if err != nil {
-		return fmt.Errorf("解析自动化配置失败：%w", err)
-	}
 	if len(triggers) == 0 {
 		s.SetStep(j, stepName, "skipped", "安装包未声明自动化")
 		return nil
@@ -459,8 +462,7 @@ func (s *Client) deployAutomations(ctx context.Context, j *domain.Job, work, sou
 	}
 	if err := s.Request(ctx, j.Profile, work, "GET", Path(j.TargetID, "/triggers"),
 		map[string]any{"page_size": 100}, nil, &listed); err != nil {
-		s.SetStep(j, stepName, "warning", "自动化列表查询失败，需在妙搭后台手动确认")
-		return nil
+		return fmt.Errorf("查询自动化列表失败：%w", err)
 	}
 	existing := map[string]map[string]any{}
 	for _, item := range listed.Items {
@@ -479,7 +481,7 @@ func (s *Client) deployAutomations(ctx context.Context, j *domain.Job, work, sou
 				path := Path(j.TargetID, "/triggers/"+url.PathEscape(name))
 				if err := s.Request(ctx, j.Profile, work, "PUT", path, nil,
 					map[string]any{"description": expected}, nil); err != nil {
-					failures = append(failures, name)
+					failures = append(failures, name+"："+clipText(err.Error(), 200))
 					continue
 				}
 				updated++
@@ -487,16 +489,19 @@ func (s *Client) deployAutomations(ctx context.Context, j *domain.Job, work, sou
 			skipped++
 			continue
 		}
-		if err := s.Request(ctx, j.Profile, work, "POST", Path(j.TargetID, "/triggers"), nil, trigger, nil); err != nil {
-			failures = append(failures, name)
+		body, err := automationRequestBody(trigger)
+		if err != nil {
+			return fmt.Errorf("解析自动化 %s 失败：%w", name, err)
+		}
+		if err := s.Request(ctx, j.Profile, work, "POST", Path(j.TargetID, "/triggers"), nil, body, nil); err != nil {
+			failures = append(failures, name+"："+clipText(err.Error(), 200))
 			continue
 		}
 		created++
 	}
 	detail := fmt.Sprintf("创建 %d 个，更新 %d 个，已存在 %d 个", created, updated, skipped)
 	if len(failures) > 0 {
-		s.SetStep(j, stepName, "warning", detail+"；失败："+strings.Join(failures, "、"))
-		return nil
+		return errors.New(detail + "；失败：" + strings.Join(failures, "、"))
 	}
 	s.SetStep(j, stepName, "success", detail)
 	return nil
@@ -508,13 +513,9 @@ var reservedEnvKeys = map[string]bool{
 }
 
 // deployEnvironment 创建或更新应用环境变量。
-func (s *Client) deployEnvironment(ctx context.Context, j *domain.Job, work, source string) error {
+func (s *Client) deployEnvironment(ctx context.Context, j *domain.Job, work string, definitions []envDefinition) error {
 	const stepName = "设置环境变量"
 	s.SetStep(j, stepName, "running", "")
-	definitions, err := parseEnvDocument(filepath.Join(source, assembleRelativeDir, "env.md"))
-	if err != nil {
-		return fmt.Errorf("解析环境变量配置失败：%w", err)
-	}
 	if len(definitions) == 0 {
 		s.SetStep(j, stepName, "skipped", "安装包未声明环境变量")
 		return nil
@@ -527,7 +528,7 @@ func (s *Client) deployEnvironment(ctx context.Context, j *domain.Job, work, sou
 			continue
 		}
 		if !item.HasValue {
-			empty = append(empty, item.Key)
+			empty = append(empty, strings.Join(item.Envs, "/")+":"+item.Key)
 			continue
 		}
 		for _, env := range item.Envs {

@@ -180,7 +180,7 @@ func (c *Client) SelectProfile(ctx context.Context, name string, ready bool) (Pr
 	return Profile{}, errors.New("找不到选中的飞书 CLI 配置")
 }
 
-func (c *Client) ScopedEnvironment(dir, profile string) ([]string, error) {
+func (c *Client) ScopedEnvironment(dir, profile, appID string) ([]string, error) {
 	binary, err := c.Binary()
 	if err != nil {
 		return nil, err
@@ -197,7 +197,11 @@ func (c *Client) ScopedEnvironment(dir, profile string) ([]string, error) {
 	if err := os.WriteFile(filepath.Join(shimDir, "lark-cli"), []byte(shim), 0700); err != nil {
 		return nil, err
 	}
-	env := append(os.Environ(), "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	env, err := c.GitEnvironment(profile, appID)
+	if err != nil {
+		return nil, err
+	}
+	env = append(env, "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"PLATFORM_LARK_BINARY="+binary, "PLATFORM_LARK_PROFILE="+profile, "GIT_TERMINAL_PROMPT=0",
 		"TMPDIR="+dir)
 	if zipBinary, err := exec.LookPath("zip"); err == nil {

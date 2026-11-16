@@ -115,7 +115,7 @@ func (s *Service) packageJob(ctx context.Context, job *domain.Job) error {
 		if err != nil {
 			return err
 		}
-		env, err := s.Lark.ScopedEnvironment(work, job.Profile)
+		env, err := s.Lark.ScopedEnvironment(work, job.Profile, app.ID)
 		if err != nil {
 			return err
 		}

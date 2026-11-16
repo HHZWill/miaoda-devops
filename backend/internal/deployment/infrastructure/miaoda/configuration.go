@@ -1,21 +1,23 @@
 package miaoda
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
-	"regexp"
-	"strconv"
+	"path/filepath"
+	"slices"
 	"strings"
 )
 
-var yamlBlockPattern = regexp.MustCompile("(?is)```(?:yaml|yml)\\s*(.*?)```")
-
 type roleDefinition struct {
-	RoleID      string
-	Name        string
-	Description string
-	Admin       bool
+	RoleID      string `json:"role_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Admin       bool   `json:"admin"`
 }
 
 type envDefinition struct {
@@ -25,238 +27,160 @@ type envDefinition struct {
 	HasValue bool
 }
 
-// parseDocumentItems 解析部署文档中的简单 YAML 列表。
-func parseDocumentItems(path, root string) ([]map[string]any, error) {
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+type deploymentConfiguration struct {
+	Roles       []roleDefinition
+	AdminID     string
+	Automations []map[string]any
+	Environment []envDefinition
+}
+
+type configurationDeclaration struct {
+	Count              *int     `json:"count"`
+	SHA256             string   `json:"sha256"`
+	ManualRequiredKeys []string `json:"manual_required_keys"`
+}
+
+type configurationDocument struct {
+	FormatVersion      int               `json:"format_version"`
+	Kind               string            `json:"kind"`
+	Roles              []json.RawMessage `json:"roles"`
+	Automations        []json.RawMessage `json:"automations"`
+	Environment        []json.RawMessage `json:"env_vars"`
+	ManualRequiredKeys []string          `json:"manual_required_keys"`
+}
+
+// loadDeploymentConfiguration 按 manifest 校验全部配置后再允许部署。
+func loadDeploymentConfiguration(source string) (deploymentConfiguration, error) {
+	var result deploymentConfiguration
+	docs := filepath.Join(source, assembleRelativeDir)
+	raw, err := os.ReadFile(filepath.Join(docs, "manifest.json"))
 	if err != nil {
-		return nil, err
+		return result, fmt.Errorf("无法读取部署配置清单 manifest.json：%w", err)
 	}
-	body := string(raw)
-	if match := yamlBlockPattern.FindStringSubmatch(body); len(match) == 2 {
-		body = match[1]
+	var manifest struct {
+		FormatVersion int                                 `json:"format_version"`
+		Kind          string                              `json:"kind"`
+		Config        map[string]configurationDeclaration `json:"config"`
 	}
-	items := []map[string]any{}
-	var current map[string]any
-	// 按行解析部署产物约定的扁平列表。
-	for _, rawLine := range strings.Split(body, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") || line == root+":" {
-			continue
+	if json.Unmarshal(raw, &manifest) != nil || manifest.FormatVersion != 1 || manifest.Kind != "deployment_manifest" {
+		return result, errors.New("manifest.json 格式无效或版本不受支持")
+	}
+	for _, spec := range []struct{ key, file, kind string }{
+		{"roles", "roles.json", "roles"},
+		{"automation", "automation.json", "automations"},
+		{"env", "env.json", "env_vars"},
+	} {
+		declaration, ok := manifest.Config[spec.key]
+		if !ok || declaration.Count == nil || *declaration.Count < 0 {
+			return result, fmt.Errorf("manifest.json 缺少有效的 config.%s 声明", spec.key)
 		}
-		if strings.HasPrefix(line, "- ") {
-			if current != nil {
-				items = append(items, current)
-			}
-			current = map[string]any{}
-			line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		document, items, err := readConfigurationJSON(docs, spec.file, spec.kind, declaration)
+		if err != nil {
+			return result, err
 		}
-		if current == nil {
-			continue
-		}
-		key, value, found := strings.Cut(line, ":")
-		if found {
-			current[strings.TrimSpace(key)] = parseDocumentValue(value)
-		}
-	}
-	if current != nil {
-		items = append(items, current)
-	}
-	return items, nil
-}
-
-// parseDocumentValue 解析字符串、布尔值和内联数组。
-func parseDocumentValue(raw string) any {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return ""
-	}
-	if strings.EqualFold(value, "true") {
-		return true
-	}
-	if strings.EqualFold(value, "false") {
-		return false
-	}
-	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-		inner := strings.TrimSpace(value[1 : len(value)-1])
-		if inner == "" {
-			return []string{}
-		}
-		values := []string{}
-		// 内联数组仅允许标量值。
-		for _, item := range strings.Split(inner, ",") {
-			values = append(values, unquoteDocumentValue(item))
-		}
-		return values
-	}
-	return unquoteDocumentValue(value)
-}
-
-// unquoteDocumentValue 去除 YAML 标量引号。
-func unquoteDocumentValue(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		return value[1 : len(value)-1]
-	}
-	if decoded, err := strconv.Unquote(value); err == nil {
-		return decoded
-	}
-	return value
-}
-
-// parseRolesDocument 读取应用角色定义。
-func parseRolesDocument(path string) ([]roleDefinition, string, error) {
-	items, err := parseDocumentItems(path, "roles")
-	if err != nil {
-		return nil, "", err
-	}
-	roles, adminID := []roleDefinition{}, ""
-	// 丢弃缺少编码或名称的非法条目。
-	for _, item := range items {
-		role := roleDefinition{
-			RoleID:      strings.TrimSpace(toString(item["role_id"])),
-			Name:        strings.TrimSpace(toString(item["name"])),
-			Description: strings.TrimSpace(toString(item["description"])),
-			Admin:       item["admin"] == true,
-		}
-		if role.RoleID == "" || role.Name == "" {
-			continue
-		}
-		roles = append(roles, role)
-		if role.Admin && adminID == "" {
-			adminID = role.RoleID
-		}
-	}
-	return roles, adminID, nil
-}
-
-// parseAutomationDocument 读取自动化触发器定义。
-func parseAutomationDocument(path string) ([]map[string]any, error) {
-	items, err := parseDocumentItems(path, "automations")
-	if err != nil {
-		return nil, err
-	}
-	triggers := []map[string]any{}
-	// 转换为妙搭触发器接口结构。
-	for _, item := range items {
-		name := strings.TrimSpace(toString(item["name"]))
-		if name == "" {
-			continue
-		}
-		triggerType := defaultString(toString(item["trigger_type"]), "cron")
-		trigger := map[string]any{
-			"name":         name,
-			"trigger_type": triggerType,
-			"status":       defaultString(toString(item["status"]), "enabled"),
-		}
-		if description := strings.TrimSpace(toString(item["description"])); description != "" {
-			trigger["description"] = description
-		}
-		switch triggerType {
-		case "cron":
-			trigger["cron_condition"] = map[string]any{
-				"cron":     defaultString(toString(item["cron"]), "0 * * * *"),
-				"timezone": defaultString(toString(item["timezone"]), "Asia/Shanghai"),
-			}
-		case "record_change":
-			table, event := strings.TrimSpace(toString(item["table"])), strings.ToUpper(strings.TrimSpace(toString(item["event"])))
-			if table != "" && event != "" {
-				condition := map[string]any{"table": table, "event": event}
-				if fields := stringSlice(item["fields"]); len(fields) > 0 {
-					condition["fields"] = fields
+		switch spec.key {
+		case "roles":
+			for i, raw := range items {
+				var role roleDefinition
+				if json.Unmarshal(raw, &role) != nil || strings.TrimSpace(role.RoleID) == "" || strings.TrimSpace(role.Name) == "" {
+					return result, fmt.Errorf("roles.json 第 %d 项缺少有效角色编码或名称", i+1)
 				}
-				trigger["record_change_condition"] = condition
+				result.Roles = append(result.Roles, role)
+				if role.Admin && result.AdminID == "" {
+					result.AdminID = role.RoleID
+				}
 			}
-		case "webhook":
-			trigger["webhook_condition"] = map[string]any{"white_ip_list": stringSlice(item["white_ip_list"])}
-		case "feishu_approval":
-			code, event := strings.TrimSpace(toString(item["approval_code"])), strings.TrimSpace(toString(item["event_type"]))
-			if code != "" && event != "" {
-				condition := map[string]any{"approval_code": code, "event_type": event}
-				if event == "approval_instance" {
-					condition["instance_status"] = stringSlice(item["instance_status"])
+		case "automation":
+			for i, raw := range items {
+				var trigger map[string]any
+				decoder := json.NewDecoder(bytes.NewReader(raw))
+				decoder.UseNumber()
+				if decoder.Decode(&trigger) != nil {
+					return result, fmt.Errorf("automation.json 第 %d 项格式无效", i+1)
 				}
-				if event == "approval_task" {
-					condition["task_status"] = stringSlice(item["task_status"])
+				for _, key := range []string{"name", "trigger_type", "status"} {
+					value, ok := trigger[key].(string)
+					if !ok || strings.TrimSpace(value) == "" {
+						return result, fmt.Errorf("automation.json 第 %d 项缺少有效的 %s", i+1, key)
+					}
 				}
-				trigger["feishu_approval_condition"] = condition
+				if condition, ok := trigger["trigger_condition"].(map[string]any); !ok || condition == nil {
+					return result, fmt.Errorf("automation.json 第 %d 项缺少有效的 trigger_condition", i+1)
+				}
+				if _, err := automationRequestBody(trigger); err != nil {
+					return result, fmt.Errorf("automation.json 第 %d 项：%w", i+1, err)
+				}
+				// 保留导出结构，在请求边界转换条件字段名。
+				result.Automations = append(result.Automations, trigger)
+			}
+		case "env":
+			manual := []string{}
+			for i, raw := range items {
+				var item struct {
+					Key      string   `json:"key"`
+					Value    *string  `json:"value"`
+					Envs     []string `json:"envs"`
+					HasValue *bool    `json:"has_value"`
+				}
+				if json.Unmarshal(raw, &item) != nil || strings.TrimSpace(item.Key) == "" ||
+					item.HasValue == nil || len(item.Envs) == 0 {
+					return result, fmt.Errorf("env.json 第 %d 项缺少有效的 key、envs 或 has_value", i+1)
+				}
+				for _, env := range item.Envs {
+					if env != "dev" && env != "online" {
+						return result, fmt.Errorf("env.json 第 %d 项包含不支持的环境", i+1)
+					}
+				}
+				value := ""
+				if item.Value != nil {
+					value = *item.Value
+				}
+				if (*item.HasValue && item.Value == nil) || (!*item.HasValue && value != "") {
+					return result, fmt.Errorf("env.json 第 %d 项的 value 与 has_value 不一致", i+1)
+				}
+				result.Environment = append(result.Environment, envDefinition{
+					Key: item.Key, Value: value, Envs: item.Envs, HasValue: *item.HasValue,
+				})
+				if !*item.HasValue {
+					manual = append(manual, strings.Join(item.Envs, "/")+":"+item.Key)
+				}
+			}
+			if !slices.Equal(document.ManualRequiredKeys, declaration.ManualRequiredKeys) ||
+				!slices.Equal(document.ManualRequiredKeys, manual) {
+				return result, errors.New("env.json 的 manual_required_keys 与配置或 manifest.json 不一致")
 			}
 		}
-		triggers = append(triggers, trigger)
 	}
-	return triggers, nil
+	return result, nil
 }
 
-// parseEnvDocument 读取环境变量定义。
-func parseEnvDocument(path string) ([]envDefinition, error) {
-	items, err := parseDocumentItems(path, "env_vars")
+func readConfigurationJSON(docs, file, kind string, declaration configurationDeclaration) (configurationDocument, []json.RawMessage, error) {
+	var document configurationDocument
+	raw, err := os.ReadFile(filepath.Join(docs, file))
 	if err != nil {
-		return nil, err
+		return document, nil, fmt.Errorf("无法读取部署配置 %s：%w", file, err)
 	}
-	definitions := []envDefinition{}
-	// 环境为空时默认同步到 dev 和 online。
-	for _, item := range items {
-		key := strings.TrimSpace(toString(item["key"]))
-		if key == "" {
-			continue
-		}
-		value := toString(item["value"])
-		envs := stringSlice(item["envs"])
-		if len(envs) == 0 {
-			envs = []string{"dev", "online"}
-		}
-		valid := []string{}
-		for _, env := range envs {
-			if env == "dev" || env == "online" {
-				valid = append(valid, env)
-			}
-		}
-		if len(valid) == 0 {
-			valid = []string{"dev", "online"}
-		}
-		definitions = append(definitions, envDefinition{Key: key, Value: value, Envs: valid, HasValue: value != ""})
+	hash := sha256.Sum256(raw)
+	if !strings.EqualFold(declaration.SHA256, hex.EncodeToString(hash[:])) {
+		return document, nil, fmt.Errorf("%s 的 SHA256 与 manifest.json 不一致", file)
 	}
-	return definitions, nil
-}
-
-func toString(value any) string {
-	if value == nil {
-		return ""
+	if json.Unmarshal(raw, &document) != nil || document.FormatVersion != 1 || document.Kind != kind {
+		return document, nil, fmt.Errorf("%s 格式无效或版本不受支持", file)
 	}
-	if text, ok := value.(string); ok {
-		return text
+	var items []json.RawMessage
+	switch kind {
+	case "roles":
+		items = document.Roles
+	case "automations":
+		items = document.Automations
+	case "env_vars":
+		items = document.Environment
 	}
-	return strings.TrimSpace(string(mustJSON(value)))
-}
-
-func mustJSON(value any) []byte {
-	raw, _ := json.Marshal(value)
-	return raw
-}
-
-func stringSlice(value any) []string {
-	switch typed := value.(type) {
-	case []string:
-		return typed
-	case string:
-		values := []string{}
-		// 兼容逗号分隔列表。
-		for _, item := range strings.Split(typed, ",") {
-			if item = strings.TrimSpace(item); item != "" {
-				values = append(values, item)
-			}
-		}
-		return values
-	default:
-		return nil
+	if items == nil {
+		return document, nil, fmt.Errorf("%s 缺少配置数组，空配置必须显式声明 []", file)
 	}
-}
-
-func defaultString(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
+	if len(items) != *declaration.Count {
+		return document, nil, fmt.Errorf("%s 的配置数量与 manifest.json 不一致", file)
 	}
-	return strings.TrimSpace(value)
+	return document, items, nil
 }
