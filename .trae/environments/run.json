@@ -5,7 +5,7 @@
     {
       "id": "web",
       "name": "妙搭部署平台",
-      "command": "export MIAODA_ASSEMBLE_SCRIPT=\"$HOME/.trae-cn/skills/miaoda-app-assemble/scripts/export-miaoda-app.sh\"\ngo version && npm --prefix frontend start",
+      "command": "export MIAODA_ASSEMBLE_SCRIPT=\"$HOME/.trae-cn/skills/miaoda-app-assemble/scripts/export-miaoda-app.sh\"\ngo version && npm --prefix fe start",
       "cwd": ".",
       "background": true,
       "source": "agent",

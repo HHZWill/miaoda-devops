@@ -4,11 +4,22 @@
 
 ## 启动
 
+推荐使用预编译启动程序，运行无需预装 Node.js、npm 或 Go：
+
+- Mac：双击 `dist/妙搭部署平台.app`。
+- Windows x64：完整解压 `dist/妙搭部署平台-windows-x64.zip`，双击其中的 `妙搭部署平台.exe`。
+
+首次启动会自动检测 Node.js/npm、lark-cli、Git、Bash、zip 和打包组件。检测以命令能否正常运行为准，不强制限定版本；缺少工具或命令不可用时进入登录前的**初始环境**页面，点击「一键安装」使用随程序附带的本地安装包。安装显示进度，失败可重试；安装后自动复检，通过后进入账号连接。侧边栏可随时重新打开初始环境。
+
+依赖安装到当前用户的专用目录，平台启动时自动加入自身命令搜索路径。成品无需安装 Go；安装环境无需访问 GitHub、npm 等下载站。飞书授权及妙搭操作仍需访问相应服务。版本和来源见 [`packages/README.md`](packages/README.md)。
+
+### 源码启动
+
 需要 Node.js 20.19+ 和 Go 1.22+。在项目根目录运行：
 
 ```sh
-npm --prefix frontend ci
-npm --prefix frontend start
+npm --prefix fe ci
+npm --prefix fe start
 ```
 
 macOS / Linux 可以使用 `./scripts/start.sh`；Windows 可以双击 `scripts\start.bat`，或在项目根目录运行：
@@ -17,9 +28,19 @@ macOS / Linux 可以使用 `./scripts/start.sh`；Windows 可以双击 `scripts\
 scripts\start.bat
 ```
 
-启动脚本会首次安装前端依赖、清理端口上的旧服务、构建前端并启动后端。默认地址为 [http://127.0.0.1:18080/](http://127.0.0.1:18080/)，可通过 `PORT` 修改。Windows CMD 使用 `set PORT=18081`，PowerShell 使用 `$env:PORT = '18081'`。
+启动脚本会首次安装前端依赖、构建前端并启动后端。macOS / Linux 终端启动时，若端口已被占用，会列出进程并等待确认。默认地址为 [http://127.0.0.1:18080/](http://127.0.0.1:18080/)，可通过 `PORT` 修改。Windows CMD 使用 `set PORT=18081`，PowerShell 使用 `$env:PORT = '18081'`。
 
-平台启动后会检测 lark-cli。若未安装，在终端运行 `npm install -g @larksuite/cli`，然后在页面重新检测。平台读取 `lark-cli profile list` 中的租户配置，用所选配置登录和执行任务。添加租户配置时，在终端运行 `lark-cli config init --name 租户别名`。首次登录可在页面完成飞书授权。凭据由 lark-cli 管理。
+平台读取 `lark-cli profile list` 中的租户配置，用所选配置登录和执行任务。添加租户配置时，可复制账号连接页面显示的命令到终端执行。首次登录可在页面完成飞书授权。凭据由 lark-cli 管理。
+
+### macOS 双击启动
+
+在 macOS 上运行 `./scripts/build-macos-app.sh`，然后在 Finder 中双击项目内的 `dist/妙搭部署平台.app`。应用包含已构建的前端和后端，启动后会用默认浏览器打开工作台。端口被占用时，弹窗会列出进程名称和 PID。选择「结束进程并启动」后，应用会等待端口释放再启动。选择「取消」会保留原进程。
+
+应用位于项目 `dist/` 时，任务记录和日志继续使用项目的 `data/` 和 `logs/`。单独复制应用到其他目录后，数据保存在 `~/Library/Application Support/MiaodaDeploymentPlatform/workspace`。修改代码后可重新运行构建脚本生成当前 Mac 架构的应用。
+
+### Windows 启动包构建
+
+在配置好 Node.js 和 Go 的 Mac 上运行 `./scripts/build-windows-app.sh`，生成 Windows x64 启动 ZIP。包内包含原生启动器、服务程序、已构建的前端和离线运行依赖。Windows 双击启动器后打开本地工作台。端口被其他程序占用时会提示，已运行的平台会直接复用。
 
 ## 打包与部署
 
@@ -31,7 +52,9 @@ scripts\start.bat
 
 前端和创意应用使用 lark-cli 源码导出、Git 和妙搭发布命令。全栈应用打包需要本机安装 `miaoda-app-assemble` 技能及其脚本依赖，部署由服务端 Go 代码直接完成。平台从 `~/.agents/skills` 或 `~/.codex/skills` 查找打包脚本，也可通过 `MIAODA_ASSEMBLE_SCRIPT` 指定入口路径。全栈包包含源码、配置和数据库结构，源应用业务表数据由妙搭侧单独迁移。
 
-全栈打包脚本需要 `bash`、`node`、`git`、`zip`、`unzip`、`rsync` 和 `python3`。用自定义路径安装 lark-cli 时可设置 `MIAODA_LARK_CLI` 指向可执行文件。
+全栈打包脚本需要 `bash`、`node`、`git`、`zip`、`perl` 和基础 Shell 命令；Windows 由便携 Git 提供 Bash 及配套工具。用自定义路径安装 lark-cli 时可设置 `MIAODA_LARK_CLI` 指向可执行文件。`MIAODA_TOOLS_DIR` 可指定专用工具目录，`MIAODA_PACKAGES_DIR` 可指定本地安装包目录。
+
+DDL 按扩展、类型、建表、外键、后置对象、初始化数据的阶段顺序执行，同阶段最多 3 个协程并发处理文件，单文件内 SQL 保持原顺序。任一文件失败会取消同阶段请求并停止后续阶段；建表依赖的函数与序列会提前串行创建。
 
 ## 文件与开发
 
@@ -39,6 +62,14 @@ scripts\start.bat
 - `data/imports/` 保存上传的 ZIP 与识别结果。
 - `logs/server.log` 保存服务、请求及任务执行日志。服务启动时自动创建文件，重启后继续追加，终端也会显示日志。
 - 安装包可能包含妙搭环境变量值。请仅通过受控渠道分享，并妥善保管项目内的 `data/`。
-- `frontend/src/` 存放界面，`backend/` 存放 API 和任务流程。
+- `fe/src/` 存放界面，`be/` 存放 API 和任务流程。
 
-开发模式下在两个终端分别运行 `go -C backend run ./cmd/server` 和 `npm --prefix frontend run dev`，访问 [http://127.0.0.1:5173/](http://127.0.0.1:5173/)。自定义端口时，两端使用相同的 `PORT`。
+开发模式运行 `./scripts/dev.sh`，访问 [http://127.0.0.1:5173/](http://127.0.0.1:5173/)。前端修改由 Vite 自动刷新，后端 Go 文件修改后自动编译重启；服务以守护进程运行，不会持续占用当前终端。
+
+```sh
+./scripts/dev.sh status
+./scripts/dev.sh restart
+./scripts/dev.sh stop
+```
+
+后端端口可通过 `PORT` 修改，前端端口可通过 `FRONTEND_PORT` 修改。开发日志保存在系统临时目录的 `miaoda-deployment-platform-dev-$UID/` 下。

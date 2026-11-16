@@ -1,0 +1,9 @@
+**/.DS_Store
+/data/
+/logs/
+/dist/
+/packages/
+/fe/node_modules/
+/fe/dist/
+/frontend/node_modules/
+/frontend/dist/
