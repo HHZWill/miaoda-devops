@@ -3,8 +3,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $rootDir = Split-Path -Parent $PSScriptRoot
-$frontendDir = Join-Path $rootDir 'frontend'
-$backendDir = Join-Path $rootDir 'backend'
+$frontendDir = Join-Path $rootDir 'fe'
+$backendDir = Join-Path $rootDir 'be'
 
 try {
     # Validate Node.js and use npm.cmd to avoid npm.ps1 policy restrictions.

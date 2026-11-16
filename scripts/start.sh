@@ -24,20 +24,23 @@ if [[ -z "$GO_BIN" ]]; then
 fi
 
 # 首次启动时安装前端依赖。
-if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
-  npm --prefix "$ROOT_DIR/frontend" ci
-fi
-
-# 清理默认端口上的旧服务。
-PORT_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
-if [[ -n "$PORT_PIDS" ]]; then
-  echo "停止占用端口 $PORT 的进程：$PORT_PIDS"
-  kill $PORT_PIDS
+if [[ ! -d "$ROOT_DIR/fe/node_modules" ]]; then
+  npm --prefix "$ROOT_DIR/fe" ci
 fi
 
 echo "构建前端..."
-npm --prefix "$ROOT_DIR/frontend" run build
+npm --prefix "$ROOT_DIR/fe" run build
+
+source "$ROOT_DIR/scripts/port-guard.sh"
+release_port_after_confirmation "$PORT" confirm_port_in_terminal || {
+  result=$?
+  if [[ "$result" -eq 2 ]]; then
+    echo "已取消启动。"
+    exit 0
+  fi
+  exit "$result"
+}
 
 echo "启动服务：http://127.0.0.1:$PORT/"
 export PORT
-exec "$GO_BIN" -C "$ROOT_DIR/backend" run ./cmd/server
+exec "$GO_BIN" -C "$ROOT_DIR/be" run ./cmd/server
